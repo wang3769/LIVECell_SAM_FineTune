@@ -4,3 +4,6 @@ sam/*.pth
 *.db
 *.sqlite
 *.csv
+
+# Ignore local model registry
+model_registry/
