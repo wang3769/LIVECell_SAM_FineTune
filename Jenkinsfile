@@ -51,23 +51,29 @@ pipeline {
     }
 
     stage('Deploy to inference VM') {
-      steps {
-        sshagent(credentials: ['infer-vm-ssh']) {
-          sh """
-            ssh -o StrictHostKeyChecking=no -p ${INFER_PORT} azureuser@${INFER_HOST} '
-              set -e
-              docker login ${ACR_LOGIN} -u ${ACR_LOGIN} -p dummy >/dev/null 2>&1 || true
-              docker pull ${ACR_LOGIN}/${IMAGE_REPO}:latest
+        steps {
+            withCredentials([usernamePassword(credentialsId: 'acr-admin',
+                                            usernameVariable: 'ACR_USER',
+                                            passwordVariable: 'ACR_PASS')]) {
+            sshagent(credentials: ['infer-vm-ssh']) {
+                sh """
+                ssh -o StrictHostKeyChecking=no -p ${INFER_PORT} azureuser@${INFER_HOST} '
+                    set -e
+                    echo "${ACR_PASS}" | docker login ${ACR_LOGIN} -u "${ACR_USER}" --password-stdin
+                    docker pull ${ACR_LOGIN}/${IMAGE_REPO}:latest
 
-              docker rm -f ${CONTAINER_NAME} || true
-              docker run -d --restart unless-stopped \\
-                --name ${CONTAINER_NAME} \\
-                -p 8000:8000 \\
-                ${ACR_LOGIN}/${IMAGE_REPO}:latest
-            '
-          """
+                    docker rm -f ${CONTAINER_NAME} || true
+                    docker run -d --restart unless-stopped \\
+                    --name ${CONTAINER_NAME} \\
+                    -p 8000:8000 \\
+                    ${ACR_LOGIN}/${IMAGE_REPO}:latest
+                '
+                """
+            }
+            }
         }
-      }
     }
+
   }
+    
 }
