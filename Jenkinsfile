@@ -23,7 +23,7 @@ pipeline {
     stage('Build Docker image') {
       steps {
         sh """
-          docker build -t ${FULL_IMAGE} .
+          docker build -t ${FULL_IMAGE} -f docker/Dockerfile .
         """
       }
     }
