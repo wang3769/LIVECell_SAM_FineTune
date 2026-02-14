@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>SEM Measurement Demo</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; max-width: 520px; }
+    label { display:block; margin: 10px 0 6px; font-weight: 600; }
+    input, button, textarea { width: 100%; padding: 10px; font-size: 14px; }
+    button { cursor: pointer; font-weight: 700; }
+    canvas { border: 1px solid #ddd; border-radius: 12px; max-width: 100%; }
+    .hint { color: #666; font-size: 12px; margin-top: 6px; }
+    pre { background: #0b1020; color: #e6e6e6; padding: 12px; border-radius: 12px; overflow:auto; }
+    .small { font-size: 12px; color: #666; }
+  </style>
+</head>
+<body>
+  <h2>SEM Measurement Frontend (Box Prompt → /measure)</h2>
+
+  <div class="row">
+    <div class="card">
+      <label>API Base URL</label>
+      <input id="apiBase" value="http://127.0.0.1:8000" />
+
+      <label>Upload Image</label>
+      <input id="file" type="file" accept=".tif,.tiff,.png,.jpg,.jpeg" />
+
+      <label>Box (x1, y1, x2, y2)</label>
+      <input id="box" value="100,100,400,400" />
+      <div class="hint">
+        Tip: click & drag on the image to set a box (canvas). It will populate this input automatically.
+      </div>
+
+      <label>Optional: Pixels-per-unit (if your measurement converts px → nm/µm)</label>
+      <input id="scale" placeholder="e.g. 2.5 (px per nm) or leave blank" />
+
+      <button id="runBtn">Run /measure</button>
+      <div class="small" id="status"></div>
+
+      <label>Response</label>
+      <pre id="out">{}</pre>
+    </div>
+
+    <div class="card">
+      <label>Preview (draw a box)</label>
+      <canvas id="cv" width="512" height="512"></canvas>
+      <div class="hint">
+        This is just a client-side preview to help you pick a box. Your backend still does the real resize/pad logic.
+      </div>
+    </div>
+  </div>
+
+<script>
+  const apiBaseEl = document.getElementById("apiBase");
+  const fileEl = document.getElementById("file");
+  const boxEl = document.getElementById("box");
+  const scaleEl = document.getElementById("scale");
+  const runBtn = document.getElementById("runBtn");
+  const outEl = document.getElementById("out");
+  const statusEl = document.getElementById("status");
+
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+
+  let img = new Image();
+  let imgLoaded = false;
+
+  // For click-drag box selection on canvas
+  let dragging = false;
+  let start = null;
+  let currBox = null;
+
+  function parseBox(str) {
+    // expects "x1,y1,x2,y2"
+    const parts = str.split(",").map(s => Number(s.trim()));
+    if (parts.length !== 4 || parts.some(x => !Number.isFinite(x))) return null;
+    let [x1,y1,x2,y2] = parts;
+    // normalize
+    const nx1 = Math.min(x1, x2), nx2 = Math.max(x1, x2);
+    const ny1 = Math.min(y1, y2), ny2 = Math.max(y1, y2);
+    return [nx1, ny1, nx2, ny2];
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,cv.width,cv.height);
+    if (imgLoaded) {
+      // Fit image into canvas (letterbox)
+      const scale = Math.min(cv.width / img.width, cv.height / img.height);
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+      const dx = (cv.width - dw) / 2;
+      const dy = (cv.height - dh) / 2;
+
+      ctx.drawImage(img, dx, dy, dw, dh);
+
+      // draw current box (in canvas coordinates)
+      const b = currBox || parseBox(boxEl.value);
+      if (b) {
+        const [x1,y1,x2,y2] = b;
+        // These x/y are in *canvas coordinates* when user drags.
+        // When typed manually, assume also canvas coordinates for preview.
+        ctx.save();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "red";
+        ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+        ctx.restore();
+      }
+    } else {
+      ctx.save();
+      ctx.fillStyle = "#f6f6f6";
+      ctx.fillRect(0,0,cv.width,cv.height);
+      ctx.fillStyle = "#666";
+      ctx.font = "14px system-ui";
+      ctx.fillText("Upload an image to preview here.", 16, 32);
+      ctx.restore();
+    }
+  }
+
+  function canvasToImageCoords(x, y) {
+    // Convert canvas click position to image pixel coords (optional).
+    // Right now, we keep box in canvas coords for user convenience.
+    // If you want true image coords, you can convert here and send those instead.
+    return [x, y];
+  }
+
+  cv.addEventListener("mousedown", (e) => {
+    if (!imgLoaded) return;
+    dragging = true;
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    start = [x, y];
+    currBox = [x, y, x, y];
+    draw();
+  });
+
+  cv.addEventListener("mousemove", (e) => {
+    if (!dragging || !start) return;
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    currBox = [start[0], start[1], x, y];
+    draw();
+  });
+
+  cv.addEventListener("mouseup", () => {
+    if (!dragging || !currBox) return;
+    dragging = false;
+
+    // normalize box
+    let [x1,y1,x2,y2] = currBox;
+    x1 = Math.max(0, Math.min(x1, cv.width));
+    x2 = Math.max(0, Math.min(x2, cv.width));
+    y1 = Math.max(0, Math.min(y1, cv.height));
+    y2 = Math.max(0, Math.min(y2, cv.height));
+
+    const nx1 = Math.min(x1,x2), nx2 = Math.max(x1,x2);
+    const ny1 = Math.min(y1,y2), ny2 = Math.max(y1,y2);
+
+    // Put into input as integers
+    boxEl.value = `${Math.round(nx1)},${Math.round(ny1)},${Math.round(nx2)},${Math.round(ny2)}`;
+    currBox = [nx1, ny1, nx2, ny2];
+    draw();
+  });
+
+  fileEl.addEventListener("change", () => {
+    const f = fileEl.files?.[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    img = new Image();
+    img.onload = () => {
+      imgLoaded = true;
+      // Reset current box on new image
+      currBox = null;
+      draw();
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  });
+
+  runBtn.addEventListener("click", async () => {
+    const f = fileEl.files?.[0];
+    if (!f) {
+      alert("Please upload an image file first.");
+      return;
+    }
+
+    const box = parseBox(boxEl.value);
+    if (!box) {
+      alert("Box must be 'x1,y1,x2,y2' (numbers).");
+      return;
+    }
+
+    // Build form-data for FastAPI
+    const fd = new FormData();
+    fd.append("file", f);
+
+    // IMPORTANT: adjust these field names to match your FastAPI endpoint
+    // If your backend expects JSON instead, we can switch to fetch(JSON).
+    fd.append("box", box.join(","));
+
+    const scaleVal = scaleEl.value.trim();
+    if (scaleVal) fd.append("scale", scaleVal);
+
+    const apiBase = apiBaseEl.value.replace(/\/+$/, "");
+    const url = `${apiBase}/measure`;
+
+    statusEl.textContent = `POST ${url} ...`;
+    outEl.textContent = "";
+
+    try {
+      const resp = await fetch(url, { method: "POST", body: fd });
+      const text = await resp.text();
+
+      if (!resp.ok) {
+        statusEl.textContent = `Error ${resp.status}`;
+        outEl.textContent = text;
+        return;
+      }
+
+      // Try JSON parse, fallback to raw text
+      try {
+        const json = JSON.parse(text);
+        outEl.textContent = JSON.stringify(json, null, 2);
+      } catch {
+        outEl.textContent = text;
+      }
+      statusEl.textContent = `Done (${resp.status})`;
+    } catch (err) {
+      statusEl.textContent = `Network error`;
+      outEl.textContent = String(err);
+    }
+  });
+
+  draw();
+</script>
+</body>
+</html>
