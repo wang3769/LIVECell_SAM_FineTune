@@ -99,3 +99,18 @@ async def measure_sem_image(file: UploadFile = File(...)):
         "box_xyxy": box_1024,
         "measurements": measurements
     }
+
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+app = FastAPI()
+
+# Serve static frontend
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+@app.get("/")
+def ui_root():
+    return FileResponse(str(FRONTEND_DIR / "index.html"))

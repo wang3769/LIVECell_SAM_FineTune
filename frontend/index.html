@@ -1,0 +1,220 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>SEM Measurement</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 20px; }
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+    .card { border:1px solid #ddd; border-radius:12px; padding:14px; max-width:560px; }
+    input, button { width:100%; padding:10px; font-size:14px; margin-top:8px; }
+    canvas { border:1px solid #ddd; border-radius:12px; max-width:100%; background:#f6f6f6; }
+    pre { background:#0b1020; color:#e6e6e6; padding:12px; border-radius:12px; overflow:auto; }
+    .hint { color:#666; font-size:12px; margin-top:6px; }
+    .small { font-size:12px; color:#444; }
+  </style>
+</head>
+<body>
+  <h2>SEM Measurement UI</h2>
+  <div class="small">Upload → draw box → POST to <code>/measure</code></div>
+
+  <div class="row" style="margin-top:12px;">
+    <div class="card">
+      <label><b>Upload image</b></label>
+      <input id="file" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff"/>
+
+      <div class="hint">
+        If the browser can't preview TIFF, upload still works; preview may stay blank.
+      </div>
+
+      <label style="margin-top:10px;"><b>pixel_nm</b> (nm per pixel)</label>
+      <input id="pixelNm" value="1.0"/>
+
+      <label style="margin-top:10px;"><b>Box (image pixels)</b></label>
+      <input id="box" readonly />
+
+      <button id="runBtn">Run measurement</button>
+
+      <div class="hint" id="status"></div>
+
+      <label style="margin-top:10px;"><b>Response</b></label>
+      <pre id="out">{}</pre>
+    </div>
+
+    <div class="card">
+      <label><b>Preview (draw a box)</b></label>
+      <canvas id="cv" width="720" height="540"></canvas>
+      <div class="hint">
+        Drag to draw a rectangle. The box sent is converted to <b>original image pixel coords</b>.
+      </div>
+    </div>
+  </div>
+
+<script>
+const fileEl = document.getElementById("file");
+const pixelNmEl = document.getElementById("pixelNm");
+const boxEl = document.getElementById("box");
+const runBtn = document.getElementById("runBtn");
+const outEl = document.getElementById("out");
+const statusEl = document.getElementById("status");
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+
+let img = new Image();
+let imgLoaded = false;
+
+// fit parameters for mapping canvas -> image pixels
+let fit = { scale: 1, dx: 0, dy: 0, dw: 0, dh: 0 };
+
+let dragging = false;
+let start = null;
+let rectCanvas = null; // [x1,y1,x2,y2] in canvas coords
+
+function computeFit() {
+  const scale = Math.min(cv.width / img.width, cv.height / img.height);
+  const dw = img.width * scale;
+  const dh = img.height * scale;
+  const dx = (cv.width - dw) / 2;
+  const dy = (cv.height - dh) / 2;
+  fit = { scale, dx, dy, dw, dh };
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function draw() {
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.fillStyle = "#f6f6f6";
+  ctx.fillRect(0,0,cv.width,cv.height);
+
+  if (!imgLoaded) {
+    ctx.fillStyle = "#666";
+    ctx.font = "14px system-ui";
+    ctx.fillText("Upload an image to preview here.", 16, 28);
+    return;
+  }
+
+  ctx.drawImage(img, fit.dx, fit.dy, fit.dw, fit.dh);
+
+  if (rectCanvas) {
+    const [x1,y1,x2,y2] = rectCanvas;
+    ctx.save();
+    ctx.strokeStyle = "red";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.restore();
+  }
+}
+
+function canvasRectToImageBox(rc) {
+  let [x1,y1,x2,y2] = rc;
+  const nx1 = Math.min(x1,x2), nx2 = Math.max(x1,x2);
+  const ny1 = Math.min(y1,y2), ny2 = Math.max(y1,y2);
+
+  // clamp to drawn image region
+  const cx1 = clamp(nx1, fit.dx, fit.dx + fit.dw);
+  const cx2 = clamp(nx2, fit.dx, fit.dx + fit.dw);
+  const cy1 = clamp(ny1, fit.dy, fit.dy + fit.dh);
+  const cy2 = clamp(ny2, fit.dy, fit.dy + fit.dh);
+
+  // convert to image pixels
+  const ix1 = Math.round((cx1 - fit.dx) / fit.scale);
+  const ix2 = Math.round((cx2 - fit.dx) / fit.scale);
+  const iy1 = Math.round((cy1 - fit.dy) / fit.scale);
+  const iy2 = Math.round((cy2 - fit.dy) / fit.scale);
+
+  // clamp to image bounds
+  const bx1 = clamp(ix1, 0, img.width - 1);
+  const bx2 = clamp(ix2, 0, img.width - 1);
+  const by1 = clamp(iy1, 0, img.height - 1);
+  const by2 = clamp(iy2, 0, img.height - 1);
+
+  return [bx1, by1, bx2, by2];
+}
+
+cv.addEventListener("mousedown", (e) => {
+  if (!imgLoaded) return;
+  dragging = true;
+  const r = cv.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  start = [x,y];
+  rectCanvas = [x,y,x,y];
+  draw();
+});
+
+cv.addEventListener("mousemove", (e) => {
+  if (!dragging || !start) return;
+  const r = cv.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  rectCanvas = [start[0], start[1], x, y];
+  draw();
+});
+
+cv.addEventListener("mouseup", () => {
+  if (!dragging || !rectCanvas) return;
+  dragging = false;
+  const boxImg = canvasRectToImageBox(rectCanvas);
+  boxEl.value = boxImg.join(",");
+  draw();
+});
+
+fileEl.addEventListener("change", () => {
+  const f = fileEl.files?.[0];
+  if (!f) return;
+
+  const url = URL.createObjectURL(f);
+  img = new Image();
+  img.onload = () => {
+    imgLoaded = true;
+    computeFit();
+    rectCanvas = null;
+    boxEl.value = "";
+    draw();
+    URL.revokeObjectURL(url);
+  };
+  img.onerror = () => {
+    imgLoaded = false;
+    rectCanvas = null;
+    boxEl.value = "";
+    draw();
+  };
+  img.src = url;
+});
+
+runBtn.addEventListener("click", async () => {
+  const f = fileEl.files?.[0];
+  if (!f) { alert("Upload an image first."); return; }
+  if (!boxEl.value) { alert("Draw a box first."); return; }
+
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("box", boxEl.value);
+  fd.append("pixel_nm", pixelNmEl.value.trim() || "1.0");
+
+  statusEl.textContent = "Calling /measure ...";
+  outEl.textContent = "";
+
+  try {
+    const resp = await fetch("/measure", { method: "POST", body: fd });
+    const txt = await resp.text();
+    if (!resp.ok) {
+      statusEl.textContent = `Error ${resp.status}`;
+      outEl.textContent = txt;
+      return;
+    }
+    try { outEl.textContent = JSON.stringify(JSON.parse(txt), null, 2); }
+    catch { outEl.textContent = txt; }
+    statusEl.textContent = "Done.";
+  } catch (e) {
+    statusEl.textContent = "Network error.";
+    outEl.textContent = String(e);
+  }
+});
+
+draw();
+</script>
+</body>
+</html>
