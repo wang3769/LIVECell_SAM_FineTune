@@ -1,21 +1,29 @@
 # api/main.py
+import os
+import io
+from pathlib import Path
 
-# FastAPI is the web framework that exposes your functions as HTTP APIs
-from fastapi import FastAPI, UploadFile, File
-
-# NumPy for array handling
 import numpy as np
-
-# OpenCV for image decoding
 import cv2
-
 import tifffile
+
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from preprocessing.resize_pad import resize_and_pad
+from localization.localize import localize_box
+from segmentation.sam_wrapper import SAMSegmenter
+from measurement.geometry import measure
+
 
 def decode_upload(filename: str, file_bytes: bytes) -> np.ndarray:
     ext = os.path.splitext(filename.lower())[1]
+
+    # TIFF / TIF
     if ext in [".tif", ".tiff"]:
-        img = tifffile.imread(file_bytes)  # robust TIFF decode
-        # ensure 2D
+        img = tifffile.imread(io.BytesIO(file_bytes))
+        # ensure 2D grayscale
         if img.ndim > 2:
             img = img[..., 0]
         # normalize to uint8 if needed
@@ -25,7 +33,7 @@ def decode_upload(filename: str, file_bytes: bytes) -> np.ndarray:
             img = (img / (img.max() + 1e-8) * 255.0).astype(np.uint8)
         return img
 
-    # fallback for png/jpg
+    # PNG/JPG fallback via OpenCV
     buf = np.frombuffer(file_bytes, dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
     if img is None:
@@ -34,83 +42,96 @@ def decode_upload(filename: str, file_bytes: bytes) -> np.ndarray:
         img = img.mean(axis=2).astype(np.uint8)
     return img
 
-# Your own modules (already implemented elsewhere)
-from preprocessing.resize_pad import resize_and_pad
-from localization.localize import localize_box
-from segmentation.sam_wrapper import SAMSegmenter
-from measurement.geometry import measure
 
-
-# -------------------------
-# Create API app instance
-# -------------------------
 app = FastAPI()
 
+# ---- Serve frontend (optional) ----
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
-# -------------------------
-# Load model ONCE at startup
-# -------------------------
-# This avoids reloading the model for every request
+    @app.get("/")
+    def ui_root():
+        return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+
+# ---- Load model once ----
 segmenter = SAMSegmenter(
     encoder_ckpt="sam/sam_vit_b_01ec64.pth",
-    decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260123_220829/mask_decoder.pt"
+    decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260123_220829/mask_decoder.pt",
 )
 
-# -------------------------
-# Define inference endpoint
-# -------------------------
+
 @app.post("/measure")
 async def measure_sem_image(file: UploadFile = File(...)):
-    """
-    API endpoint:
-    - Accepts an uploaded SEM image
-    - Runs preprocess → localization → SAM → measurement
-    - Returns geometry results as JSON
-    """
-
-    # Read raw file bytes from the request
     img_bytes = await file.read()
-    image = decode_upload(file.filename, img_bytes)
 
-    # Convert bytes to NumPy buffer
-    np_buf = np.frombuffer(img_bytes, dtype=np.uint8)
+    try:
+        image = decode_upload(file.filename, img_bytes)  # uint8 2D
+    except Exception as e:
+        return {"error": f"Decode failed: {type(e).__name__}: {e}"}
 
-    # Decode image into grayscale array
-    gray = cv2.imdecode(np_buf, cv2.IMREAD_GRAYSCALE)
+    # Preprocess expects an image array (not raw bytes)
+    image_1024, meta = resize_and_pad(image)
 
-    # Safety check: ensure decoding worked
-    if gray is None:
-        return {"error": "Invalid image file or unsupported format."}
+    # --- debug / guards ---
+    if not isinstance(image_1024, np.ndarray):
+        return {
+            "error": "resize_and_pad did not return np.ndarray",
+            "type": str(type(image_1024)),
+        }
 
-    # Preprocess image (your implementation)
-    image_1024 = resize_and_pad(np_buf)
+    if image_1024.dtype == object:
+        return {
+            "error": "image_1024 has dtype=object (not numeric)",
+            "shape": getattr(image_1024, "shape", None),
+        }
 
-    # Localize bounding box (your implementation)
+    # If image is 3-channel, convert to grayscale
+    if image_1024.ndim == 3:
+        image_1024 = cv2.cvtColor(image_1024, cv2.COLOR_BGR2GRAY)
+
+    # Ensure uint8 (Canny expects 8-bit single-channel in the common case)
+    if image_1024.dtype != np.uint8:
+        image_1024 = cv2.normalize(image_1024, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # Ensure contiguous memory
+    image_1024 = np.ascontiguousarray(image_1024)
+    # Localize box on the preprocessed image
     box_1024 = localize_box(image_1024)
 
-    # Run SAM with box prompt
+    # SAM segmentation using box prompt
     pred_mask = segmenter.segment_with_box(image_1024, box_1024)
 
-    # Compute measurements from predicted mask
+    # Geometry measurement
     measurements = measure(pred_mask, pixel_nm=1.0)
-
-    # Return structured JSON response
-    return {
+    return to_jsonable({
         "box_xyxy": box_1024,
-        "measurements": measurements
-    }
+        "measurements": measurements,
+        "preprocess_meta": meta,
+    })
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pathlib import Path
+# JSON serialization. FastAPI can’t serialize NumPy scalar types like np.int64, np.float32, and also struggles with arrays unless they’re converted to native Python types.
+def to_jsonable(x):
+    # numpy scalar -> python scalar
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
 
-app = FastAPI()
+    # numpy array -> list
+    if isinstance(x, np.ndarray):
+        return x.tolist()
 
-# Serve static frontend
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+    # dict -> recurse
+    if isinstance(x, dict):
+        return {k: to_jsonable(v) for k, v in x.items()}
 
-@app.get("/")
-def ui_root():
-    return FileResponse(str(FRONTEND_DIR / "index.html"))
+    # list/tuple -> recurse
+    if isinstance(x, (list, tuple)):
+        return [to_jsonable(v) for v in x]
+
+    # fallback (already jsonable: str/int/float/bool/None)
+    return x
