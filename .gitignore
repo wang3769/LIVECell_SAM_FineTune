@@ -1,9 +1,9 @@
 # Ignore any database and large data files in the project data folder
 data/**
-sam/*.pth
+#sam/*.pth
 *.db
 *.sqlite
 *.csv
 
 # Ignore local model registry
-#model_registry/
+model_registry/
