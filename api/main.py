@@ -17,6 +17,7 @@ from segmentation.sam_wrapper import SAMSegmenter
 from measurement.geometry import measure
 
 
+
 def decode_upload(filename: str, file_bytes: bytes) -> np.ndarray:
     ext = os.path.splitext(filename.lower())[1]
 
@@ -56,10 +57,25 @@ if FRONTEND_DIR.exists():
 
 
 # ---- Load model once ----
-segmenter = SAMSegmenter(
-    encoder_ckpt="sam/sam_vit_b_01ec64.pth",
-    decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260201_173652/mask_decoder.pt",
-)
+# in cloud, encoder and decoder are included via download and special push, just to ensure they exist.
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]  # project root (adjust if needed)
+
+ENC = ROOT / "sam" / "sam_vit_b_01ec64.pth"
+DEC = ROOT / "model_registry" / "livecell_sam_vit_b_boxprompt" / "20260201_173652" / "mask_decoder.pt"
+
+if not ENC.exists():
+    raise RuntimeError(f"Missing encoder_ckpt: {ENC}")
+if not DEC.exists():
+    raise RuntimeError(f"Missing decoder_ckpt: {DEC}")
+
+segmenter = SAMSegmenter(encoder_ckpt=str(ENC), decoder_ckpt=str(DEC))
+
+# segmenter = SAMSegmenter(
+#     encoder_ckpt="sam/sam_vit_b_01ec64.pth",
+#     decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260201_173652/mask_decoder.pt",
+# )
 
 
 @app.post("/measure")
