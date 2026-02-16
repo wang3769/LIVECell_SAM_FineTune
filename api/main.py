@@ -58,7 +58,7 @@ if FRONTEND_DIR.exists():
 # ---- Load model once ----
 segmenter = SAMSegmenter(
     encoder_ckpt="sam/sam_vit_b_01ec64.pth",
-    decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260123_220829/mask_decoder.pt",
+    decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260201_173652/mask_decoder.pt",
 )
 
 

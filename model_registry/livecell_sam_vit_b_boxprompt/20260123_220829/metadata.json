@@ -1,0 +1,16 @@
+{
+  "model_name": "livecell_sam_vit_b_boxprompt",
+  "version": "20260123_220829",
+  "created_at": "20260123_220829",
+  "metrics": {
+    "val_iou": 0.87
+  },
+  "config": {
+    "prompt": "box",
+    "backbone": "vit_b",
+    "image_size": 1024,
+    "loss": "IoU (sigmoid)",
+    "lr": 1e-05
+  },
+  "notes": "SAM fine-tune: trained mask_decoder only; encoders frozen."
+}
