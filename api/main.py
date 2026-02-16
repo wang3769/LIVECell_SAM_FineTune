@@ -77,56 +77,6 @@ segmenter = SAMSegmenter(encoder_ckpt=str(ENC), decoder_ckpt=str(DEC))
 #     decoder_ckpt="model_registry/livecell_sam_vit_b_boxprompt/20260201_173652/mask_decoder.pt",
 # )
 
-
-@app.post("/measure")
-async def measure_sem_image(file: UploadFile = File(...)):
-    img_bytes = await file.read()
-
-    try:
-        image = decode_upload(file.filename, img_bytes)  # uint8 2D
-    except Exception as e:
-        return {"error": f"Decode failed: {type(e).__name__}: {e}"}
-
-    # Preprocess expects an image array (not raw bytes)
-    image_1024, meta = resize_and_pad(image)
-
-    # --- debug / guards ---
-    if not isinstance(image_1024, np.ndarray):
-        return {
-            "error": "resize_and_pad did not return np.ndarray",
-            "type": str(type(image_1024)),
-        }
-
-    if image_1024.dtype == object:
-        return {
-            "error": "image_1024 has dtype=object (not numeric)",
-            "shape": getattr(image_1024, "shape", None),
-        }
-
-    # If image is 3-channel, convert to grayscale
-    if image_1024.ndim == 3:
-        image_1024 = cv2.cvtColor(image_1024, cv2.COLOR_BGR2GRAY)
-
-    # Ensure uint8 (Canny expects 8-bit single-channel in the common case)
-    if image_1024.dtype != np.uint8:
-        image_1024 = cv2.normalize(image_1024, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-    # Ensure contiguous memory
-    image_1024 = np.ascontiguousarray(image_1024)
-    # Localize box on the preprocessed image
-    box_1024 = localize_box(image_1024)
-
-    # SAM segmentation using box prompt
-    pred_mask = segmenter.segment_with_box(image_1024, box_1024)
-
-    # Geometry measurement
-    measurements = measure(pred_mask, pixel_nm=1.0)
-    return to_jsonable({
-        "box_xyxy": box_1024,
-        "measurements": measurements,
-        "preprocess_meta": meta,
-    })
-
 # JSON serialization. FastAPI can’t serialize NumPy scalar types like np.int64, np.float32, and also struggles with arrays unless they’re converted to native Python types.
 def to_jsonable(x):
     # numpy scalar -> python scalar
@@ -151,3 +101,92 @@ def to_jsonable(x):
 
     # fallback (already jsonable: str/int/float/bool/None)
     return x
+
+@app.post("/measure")
+async def measure_sem_image(file: UploadFile = File(...)):
+    img_bytes = await file.read()
+
+    try:
+        image = decode_upload(file.filename, img_bytes)  # 2D uint8
+    except Exception as e:
+        return {"error": f"Decode failed: {type(e).__name__}: {e}"}
+
+    # resize_and_pad returns (padded, meta)
+    image_1024, meta = resize_and_pad(image)
+
+    if not isinstance(image_1024, np.ndarray):
+        return {"error": "resize_and_pad did not return np.ndarray", "type": str(type(image_1024))}
+
+    # Ensure grayscale uint8 contiguous for Canny/localize
+    if image_1024.ndim == 3:
+        image_1024 = cv2.cvtColor(image_1024, cv2.COLOR_BGR2GRAY)
+    if image_1024.dtype != np.uint8:
+        image_1024 = cv2.normalize(image_1024, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    image_1024 = np.ascontiguousarray(image_1024)
+
+    # Box localization on grayscale
+    box_1024 = localize_box(image_1024)
+
+    # SAM requires RGB uint8 HWC
+    sam_img_1024 = cv2.cvtColor(image_1024, cv2.COLOR_GRAY2RGB)
+    sam_img_1024 = np.ascontiguousarray(sam_img_1024, dtype=np.uint8)
+
+    pred_mask = segmenter.segment_with_box(sam_img_1024, box_1024)
+
+    measurements = measure(pred_mask, pixel_nm=1.0)
+
+    return to_jsonable({
+        "box_xyxy": box_1024,
+        "measurements": measurements,
+        "preprocess_meta": meta,
+    })
+
+# @app.post("/measure")
+# async def measure_sem_image(file: UploadFile = File(...)):
+#     img_bytes = await file.read()
+
+#     try:
+#         image = decode_upload(file.filename, img_bytes)  # uint8 2D
+#     except Exception as e:
+#         return {"error": f"Decode failed: {type(e).__name__}: {e}"}
+
+#     # Preprocess expects an image array (not raw bytes)
+#     image_1024, meta = resize_and_pad(image)
+
+#     # --- debug / guards ---
+#     if not isinstance(image_1024, np.ndarray):
+#         return {
+#             "error": "resize_and_pad did not return np.ndarray",
+#             "type": str(type(image_1024)),
+#         }
+
+#     if image_1024.dtype == object:
+#         return {
+#             "error": "image_1024 has dtype=object (not numeric)",
+#             "shape": getattr(image_1024, "shape", None),
+#         }
+
+#     # If image is 3-channel, convert to grayscale
+#     if image_1024.ndim == 3:
+#         image_1024 = cv2.cvtColor(image_1024, cv2.COLOR_BGR2GRAY)
+
+#     # Ensure uint8 (Canny expects 8-bit single-channel in the common case)
+#     if image_1024.dtype != np.uint8:
+#         image_1024 = cv2.normalize(image_1024, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+#     # Ensure contiguous memory
+#     image_1024 = np.ascontiguousarray(image_1024)
+#     # Localize box on the preprocessed image
+#     box_1024 = localize_box(image_1024)
+
+#     # SAM segmentation using box prompt
+#     pred_mask = segmenter.segment_with_box(image_1024, box_1024)
+
+#     # Geometry measurement
+#     measurements = measure(pred_mask, pixel_nm=1.0)
+#     return to_jsonable({
+#         "box_xyxy": box_1024,
+#         "measurements": measurements,
+#         "preprocess_meta": meta,
+#     })
+
