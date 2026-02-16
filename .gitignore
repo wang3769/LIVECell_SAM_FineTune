@@ -1,10 +1,10 @@
 # Ignore any database and large data files in the project data folder
 data/**
-#sam/*.pth
+sam/*.pth
 *.db
 *.sqlite
 *.csv
 
 # Ignore local model registry
 # This should not be ignored given deployment to Cloud via CICD now
-model_registry/
+#model_registry/
