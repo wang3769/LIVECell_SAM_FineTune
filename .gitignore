@@ -6,4 +6,5 @@ data/**
 *.csv
 
 # Ignore local model registry
+# This should not be ignored given deployment to Cloud via CICD now
 model_registry/
